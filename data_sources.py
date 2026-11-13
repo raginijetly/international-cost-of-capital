@@ -61,23 +61,60 @@ def tax_data():
         raise ValueError('Unexpected OECD tax rows.')
     return df[['REF_AREA','TIME_PERIOD','OBS_VALUE']], {'source':TAX,'as_of':'Latest available year for each country (shown below)','fetched_utc':stamp()}
 
-def bond_data():
-    html=get(BONDS).text
-    soup=BeautifulSoup(html,'html.parser');rows=[]
+def parse_country_bond(html, country, url):
+    """Match the exact 10-year link inside a Yield table, never the first price."""
+    soup=BeautifulSoup(html,'html.parser')
+    from urllib.parse import urlsplit
+    path=urlsplit(url).path.rstrip('/')
     for table in soup.select('table'):
         heads=[x.get_text(' ',strip=True).lower() for x in table.select('thead th')]
-        # Verify the numeric field by its header, rather than assuming a column position.
-        pos=next((i for i,x in enumerate(heads) if x in ('yield','last')),None)
-        if pos is None: continue
-        for tr in table.select('tbody tr'):
-            cells=tr.find_all('td')
-            link=tr.find('a',href=re.compile(r'/government-bond-yield'))
+        if 'yield' not in heads: continue
+        pos=heads.index('yield')
+        for tr in table.select('tr'):
+            cells=tr.find_all('td',recursive=False)
+            link=tr.find('a',href=lambda h: bool(h) and urlsplit(h).path.rstrip('/')==path)
             if not link or len(cells)<=pos: continue
-            name=link.get_text(' ',strip=True)
-            value=cells[pos].get_text(strip=True).replace('%','').replace(',','')
-            try: rate=float(value)/100
-            except ValueError: continue
-            dates=[c.get_text(' ',strip=True) for c in cells if c.get('id','').lower()=='date']
-            rows.append({'Country':name,'Yield':rate,'Observation date':dates[0] if dates else 'Not published in table'})
-    if not rows: raise ValueError('No verified 10-year yield table found. Enter yields manually from Trading Economics.')
-    return pd.DataFrame(rows).drop_duplicates('Country'), {'source':BONDS,'as_of':'Per-row dates; missing dates explicitly marked','fetched_utc':stamp()}
+            if not re.search(r'10\s*(?:Y|year)',link.get_text(' ',strip=True),re.I): continue
+            value=float(cells[pos].get_text(strip=True).replace('%','').replace(',',''))/100
+            if not -1<value<2: raise ValueError('Unexpected government yield.')
+            date=tr.find('td',id='date')
+            observed=date.get_text(' ',strip=True) if date else 'Not published'
+            # The table's month/day omits a year. Preserve the full dated observation
+            # from the page description when present; do not label fetch time as data time.
+            meta=soup.find('meta',attrs={'name':'description'})
+            match=re.search(r'on ([A-Z][a-z]+ \d{1,2}, \d{4})',meta.get('content','') if meta else '')
+            if match: observed=match.group(1)
+            return {'Country':country,'Yield':value,'Observation date':observed,'Source':url,'Fetched UTC':stamp()}
+    raise ValueError('No matching 10-year yield row found on the country page.')
+
+
+def country_bond(country):
+    slugs={'United States':'united-states','United Kingdom':'united-kingdom',
+           'Korea, Republic of':'south-korea','South Korea':'south-korea',
+           'Russian Federation':'russia',
+           'Türkiye':'turkey','Turkey':'turkey','Viet Nam':'vietnam',
+           'Taiwan, Province of China':'taiwan','Iran, Islamic Republic of':'iran',
+           'Venezuela, Bolivarian Republic of':'venezuela','Czechia':'czech-republic'}
+    slug=slugs.get(country,country.lower().replace(' ','-'))
+    base='https://tradingeconomics.com/'+slug+'/government-bond-yield'
+    errors=[]
+    # Public embedded view is an alternative rendering of the same source page.
+    for url in [base,base+'?embed']:
+        try:
+            response=requests.get(url,timeout=20,headers={'User-Agent':'Mozilla/5.0'})
+            response.raise_for_status()
+            return parse_country_bond(response.text,country,url)
+        except (requests.RequestException,ValueError) as exc:
+            errors.append(str(exc))
+    raise ValueError(country+': '+errors[-1])
+
+
+def bond_data(country='United States'):
+    rows=[];errors=[]
+    for name in dict.fromkeys(['United States',country]):
+        try: rows.append(country_bond(name))
+        except ValueError as exc: errors.append(str(exc))
+    if not rows: raise ValueError('; '.join(errors))
+    return pd.DataFrame(rows), {'source':'Trading Economics country 10-year government yield pages',
+        'as_of':'Per-row observation dates shown in source table',
+        'fetched_utc':stamp(),'fetch_errors':errors}

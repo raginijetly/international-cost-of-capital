@@ -11,8 +11,8 @@ st.write('Compare the same project in USD and the selected country’s currency.
 st.caption('Class formulas: CasePacket2026-part9, slides 574 and 577–587. Annual nominal rates; full precision calculations.')
 
 @st.cache_data(ttl=3600,show_spinner=False)
-def fetch(name):
-    return getattr(ds,name)()
+def fetch(name, *args):
+    return getattr(ds,name)(*args)
 
 if st.button('Refresh source data',help='Clears cached source data and retries all four requests.'):
     fetch.clear()
@@ -20,17 +20,17 @@ if st.button('Refresh source data',help='Clears cached source data and retries a
 if 'sources' not in st.session_state:
     loaded={}
     with st.spinner('Fetching the latest available source data…'):
-        for name in ['beta_data','spread_data','tax_data','bond_data']:
+        for name in ['beta_data','spread_data','tax_data']:
             try: loaded[name]={'data':fetch(name),'error':None}
             except Exception as exc: loaded[name]={'data':None,'error':str(exc),'attempted_utc':ds.stamp()}
     st.session_state.sources=loaded
 sources=st.session_state.sources
 for name,item in sources.items():
-    if item['error']: st.warning(f"{name.replace('_data','').title()} fetch failed: {item['error']}. Use manual inputs below. Refresh to retry.")
+    if name != 'bond_data' and item['error']: st.warning(f"{name.replace('_data','').title()} fetch failed: {item['error']}. Use manual inputs below. Refresh to retry.")
 
 def source(name):
     x=sources[name]['data'];return x[0] if x else None
-betas=source('beta_data');taxes=source('tax_data');bonds=source('bond_data')
+betas=source('beta_data');taxes=source('tax_data');bonds=None
 # All ISO countries remain selectable even when a source has no observation.
 countries={c.name:c.alpha_3 for c in pycountry.countries}
 alias={'United Kingdom':'GBR','South Korea':'KOR','Russia':'RUS','Taiwan':'TWN','Vietnam':'VNM','Turkey':'TUR','Türkiye':'TUR','United States':'USA'}
@@ -45,6 +45,18 @@ with st.sidebar:
     erp=st.number_input('Equity risk premium (%)',0.0,100.0,6.5,0.1)/100
     debt=st.slider('Target debt share (%)',0,99,30)/100
     tax_choice=st.radio('Project tax rate', ['U.S.','Selected country'],horizontal=True)
+
+# Fetch only the two countries needed, once the user has selected the target.
+try:
+    with st.spinner('Loading 10-year government yields…'):
+        bond_result=fetch('bond_data',country)
+    sources['bond_data']={'data':bond_result,'error':None}
+    bonds=bond_result[0]
+    for error in bond_result[1].get('fetch_errors',[]):
+        st.warning('Government yield unavailable: '+error+'. Enter the missing yield manually.')
+except Exception as exc:
+    sources['bond_data']={'data':None,'error':str(exc),'attempted_utc':ds.stamp()}
+    st.warning('Government yields could not be retrieved. Enter them manually from Trading Economics. '+str(exc))
 
 def tax_for(code):
     if taxes is None:return None
@@ -77,11 +89,11 @@ with a:
     beta_auto=None if betas is None else float(betas.loc[betas.Industry==industry,'Unlevered beta'].iloc[0])
     beta=field('Unlevered beta',beta_auto,'beta',False,0.0,20.0)
     us_tax=field('U.S. corporate tax rate',tax_for('USA'),'ustax')
-    foreign_tax=field('Selected-country corporate tax rate',tax_for(countries[country]),'ftax')
+    foreign_tax=field('Selected-country corporate tax rate',tax_for(countries[country]),'ftax_'+countries[country])
 with b:
     usd_spread=field('USD BBB spread',source('spread_data'),'spread')
     us_yield=field('U.S. 10-year government yield',yield_for('USA'),'usy',minval=-99.0)
-    fy=field('Selected-country 10-year government yield',yield_for(countries[country]),'fy',minval=-99.0)
+    fy=field('Selected-country 10-year government yield',yield_for(countries[country]),'fy_'+countries[country],minval=-99.0)
     override=st.toggle('Override foreign-currency BBB spread',value=False)
     fs=None
     if override:
